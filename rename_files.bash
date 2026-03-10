@@ -7,6 +7,7 @@
 #
 # Usage:
 #   ./rename_files.sh [options]
+#   ./rename_files.sh              (interactive mode)
 #
 # Options:
 #   -d, --delimiter   DELIM   Delimiter to split on            (default: " ~ ")
@@ -33,6 +34,7 @@ DELIMITER=" ~ "
 SEPARATOR=" - "
 PATTERN="2,1,3"
 DRY_RUN=false
+INTERACTIVE=false
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
 usage() {
@@ -43,6 +45,7 @@ Splits filenames on a delimiter and reassembles them in a new order/format.
 
 Usage:
   ${0##*/} [options]
+  ${0##*/}              (interactive mode — launched when no options given)
 
 Options:
   -d, --delimiter DELIM    Delimiter to split on             (default: " ~ ")
@@ -66,6 +69,11 @@ EOF
     exit 0
 }
 
+# If no arguments, launch interactive mode
+if [[ $# -eq 0 ]]; then
+    INTERACTIVE=true
+fi
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d|--delimiter) DELIMITER="$2"; shift 2 ;;
@@ -79,6 +87,51 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# ── Interactive menu ─────────────────────────────────────────────────────────
+if $INTERACTIVE; then
+    echo "╔══════════════════════════════════════╗"
+    echo "║       Configurable File Renamer      ║"
+    echo "╚══════════════════════════════════════╝"
+    echo ""
+    echo "  1) Run with defaults"
+    echo "  2) Dry run (preview only)"
+    echo "  3) Configure options"
+    echo "  4) Help"
+    echo "  5) Quit"
+    echo ""
+    read -rp "Choose an option [1-5]: " choice
+
+    case "$choice" in
+        1) ;;
+        2) DRY_RUN=true ;;
+        3)
+            echo ""
+            read -rp "Delimiter (current: \"$DELIMITER\"): " input
+            [[ -n "$input" ]] && DELIMITER="$input"
+
+            read -rp "Separator (current: \"$SEPARATOR\"): " input
+            [[ -n "$input" ]] && SEPARATOR="$input"
+
+            read -rp "Pattern   (current: \"$PATTERN\"): " input
+            [[ -n "$input" ]] && PATTERN="$input"
+
+            echo ""
+            read -rp "Dry run? [y/N]: " input
+            [[ "$input" =~ ^[Yy]$ ]] && DRY_RUN=true
+
+            echo ""
+            echo "Using:  delimiter=\"$DELIMITER\"  separator=\"$SEPARATOR\"  pattern=\"$PATTERN\"  dry-run=$DRY_RUN"
+            echo ""
+            ;;
+        4) usage ;;
+        5) echo "Aborted."; exit 0 ;;
+        *)
+            echo "Invalid choice." >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # ── Validate and parse the pattern ───────────────────────────────────────────
 IFS=',' read -ra indices <<< "$PATTERN"
@@ -104,19 +157,27 @@ for (( i = 1; i < max_index; i++ )); do
     glob+="${glob_char}*"
 done
 
-# ── Process files ────────────────────────────────────────────────────────────
+# ── Evaluate files ───────────────────────────────────────────────────────────
 affected_files=()
 unaffected_files=()
 
-# Count total candidate files first
 all_files=()
 for file in $glob; do
     [[ -d "$file" ]] && continue
     all_files+=("$file")
 done
 total=${#all_files[@]}
-current=0
 
+if (( total == 0 )); then
+    echo "No matching files found in the current directory."
+    exit 0
+fi
+if $DRY_RUN; then
+    echo ""
+    echo "Doing a DRY-RUN"
+    echo ""
+fi
+current=0
 for file in "${all_files[@]}"; do
     (( current++ )) || true
     printf "\rEvaluating %d of %d files..." "$current" "$total" >&2
@@ -136,7 +197,6 @@ for file in "${all_files[@]}"; do
     mapfile -t parts < <(awk -v d="$DELIMITER" '{
         n = split($0, a, d)
         for (i = 1; i <= n; i++) {
-            # trim whitespace
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", a[i])
             printf "%s\n", a[i]
         }
@@ -148,7 +208,6 @@ for file in "${all_files[@]}"; do
         skip_reason="not enough fields (found ${#parts[@]}, need $max_index)"
     fi
 
-    # Assemble the new name from the pattern
     new_name=""
     if ! $should_skip; then
         new_base=""
@@ -163,13 +222,12 @@ for file in "${all_files[@]}"; do
         if [[ "$file" == "$new_name" ]]; then
             should_skip=true
             skip_reason="name unchanged"
-        elif ! $DRY_RUN && [[ -e "$new_name" ]]; then
+        elif [[ -e "$new_name" ]]; then
             should_skip=true
             skip_reason="target already exists"
         fi
     fi
 
-    # ── Classify ─────────────────────────────────────────────────────────
     if $should_skip; then
         unaffected_files+=("SKIP ($skip_reason): $file")
     else
@@ -178,33 +236,73 @@ for file in "${all_files[@]}"; do
 done
 
 # Clear the progress line
-printf "\r\033[K" >&2
+# printf "\r\033[K" >&2
 
-# ── Execute or preview ───────────────────────────────────────────────────────
+
+
 if $DRY_RUN; then
+    echo ""
     for entry in "${affected_files[@]}"; do
         echo "DRY-RUN: $entry"
     done
-else
-    for entry in "${affected_files[@]}"; do
-        file="${entry%% -> *}"
-        new_name="${entry#* -> }"
-        echo "RENAME:  $entry"
-        mv -- "$file" "$new_name"
-    done
+    if (( ${#unaffected_files[@]} > 0 )); then
+        echo ""
+        for entry in "${unaffected_files[@]}"; do
+            echo "  $entry"
+        done
+    fi
+    echo ""
+    echo "Evaluated $total file(s)."
+    echo ""
+    printf "DRY-RUN Finished! \n${#affected_files[@]} file(s) would be renamed. \n${#unaffected_files[@]} skipped."
+    exit 0
 fi
 
-# ── Summary ──────────────────────────────────────────────────────────────────
-if (( ${#unaffected_files[@]} > 0 )); then
-    echo ""
-    for entry in "${unaffected_files[@]}"; do
-        echo "$entry"
-    done
+# ── Dry run or preview & confirm ──────────────────────────────────────────────
+if (( ${#affected_files[@]} == 0 )); then
+    echo "No files to rename."
+    if (( ${#unaffected_files[@]} > 0 )); then
+        echo ""
+        for entry in "${unaffected_files[@]}"; do
+            echo "  $entry"
+        done
+    fi
+    exit 0
 fi
 
 echo ""
-if $DRY_RUN; then
-    echo "Done. ${#affected_files[@]} file(s) would be renamed, ${#unaffected_files[@]} skipped."
-else
-    echo "Done. ${#affected_files[@]} file(s) renamed, ${#unaffected_files[@]} skipped."
+echo "Evaluated $total file(s)."
+echo ""
+
+echo "Files to rename (${#affected_files[@]}):"
+for entry in "${affected_files[@]}"; do
+    echo "  $entry"
+done
+
+if (( ${#unaffected_files[@]} > 0 )); then
+    echo ""
+    echo "Skipped files (${#unaffected_files[@]}):"
+    for entry in "${unaffected_files[@]}"; do
+        echo "  $entry"
+    done
 fi
+echo ""
+
+# Prompt for confirmation
+read -rp "Proceed with renaming ${#affected_files[@]} file(s)? [y/N]: " confirm
+if ! [[ "$confirm" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+# ── Execute renames ──────────────────────────────────────────────────────────
+echo ""
+for entry in "${affected_files[@]}"; do
+    file="${entry%% -> *}"
+    new_name="${entry#* -> }"
+    echo "RENAME:  $entry"
+    mv -- "$file" "$new_name"
+done
+
+echo ""
+echo "Done. ${#affected_files[@]} file(s) renamed, ${#unaffected_files[@]} skipped."
